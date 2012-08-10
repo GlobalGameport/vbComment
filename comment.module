@@ -1,0 +1,2599 @@
+<?php
+
+/**
+ * @file
+ * Enables users to vbcomment on published content.
+ *
+ * When enabled, the Drupal vbcomment module creates a discussion
+ * board for each Drupal node. Users can post vbcomments to discuss
+ * a forum topic, weblog post, story, collaborative book page, etc.
+ */
+
+/**
+ * vbcomment is awaiting approval.
+ */
+define('vbcomment_NOT_PUBLISHED', 0);
+
+/**
+ * vbcomment is published.
+ */
+define('vbcomment_PUBLISHED', 1);
+
+/**
+ * vbcomments are displayed in a flat list - expanded.
+ */
+define('vbcomment_MODE_FLAT', 0);
+
+/**
+ * vbcomments are displayed as a threaded list - expanded.
+ */
+define('vbcomment_MODE_THREADED', 1);
+
+/**
+ * Anonymous posters cannot enter their contact information.
+ */
+define('vbcomment_ANONYMOUS_MAYNOT_CONTACT', 0);
+
+/**
+ * Anonymous posters may leave their contact information.
+ */
+define('vbcomment_ANONYMOUS_MAY_CONTACT', 1);
+
+/**
+ * Anonymous posters are required to leave their contact information.
+ */
+define('vbcomment_ANONYMOUS_MUST_CONTACT', 2);
+
+/**
+ * vbcomment form should be displayed on a separate page.
+ */
+define('vbcomment_FORM_SEPARATE_PAGE', 0);
+
+/**
+ * vbcomment form should be shown below post or list of vbcomments.
+ */
+define('vbcomment_FORM_BELOW', 1);
+
+/**
+ * vbcomments for this node are hidden.
+ */
+define('vbcomment_NODE_HIDDEN', 0);
+
+/**
+ * vbcomments for this node are closed.
+ */
+define('vbcomment_NODE_CLOSED', 1);
+
+/**
+ * vbcomments for this node are open.
+ */
+define('vbcomment_NODE_OPEN', 2);
+
+/**
+ * Implements hook_help().
+ * @todo: 
+ */
+function vbcomment_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#vbcomment':
+      $output = '<h3>' . t('About') . '</h3>';
+      $output .= '<p>' . t('The vbcomment module allows users to vbcomment on site content, set vbcommenting defaults and permissions, and moderate vbcomments. For more information, see the online handbook entry for <a href="@vbcomment">vbcomment module</a>.', array('@vbcomment' => 'http://drupal.org/documentation/modules/vbcomment/')) . '</p>';
+      $output .= '<h3>' . t('Uses') . '</h3>';
+      $output .= '<dl>';
+      $output .= '<dt>' . t('Default and custom settings') . '</dt>';
+      $output .= '<dd>' . t("Each <a href='@content-type'>content type</a> can have its own default vbcomment settings configured as: <em>Open</em> to allow new vbcomments, <em>Hidden</em> to hide existing vbcomments and prevent new vbcomments, or <em>Closed</em> to view existing vbcomments, but prevent new vbcomments. These defaults will apply to all new content created (changes to the settings on existing content must be done manually). Other vbcomment settings can also be customized per content type, and can be overridden for any given item of content. When a vbcomment has no replies, it remains editable by its author, as long as the author has a user account and is logged in.", array('@content-type' => url('admin/structure/types'))) . '</dd>';
+      $output .= '<dt>' . t('vbcomment approval') . '</dt>';
+      $output .= '<dd>' . t("vbcomments from users who have the <em>Skip vbcomment approval</em> permission are published immediately. All other vbcomments are placed in the <a href='@vbcomment-approval'>Unapproved vbcomments</a> queue, until a user who has permission to <em>Administer vbcomments</em> publishes or deletes them. Published vbcomments can be bulk managed on the <a href='@admin-vbcomment'>Published vbcomments</a> administration page.", array('@vbcomment-approval' => url('admin/content/vbcomment/approval'), '@admin-vbcomment' => url('admin/content/vbcomment'))) . '</dd>';
+      $output .= '</dl>';
+      return $output;
+  }
+}
+
+/**
+ * Implements hook_entity_info().
+ */
+function vbcomment_entity_info() {
+  $return = array(
+    'vbcomment' => array(
+      'label' => t('vbcomment'),
+      'base table' => 'vbcomment',
+      'uri callback' => 'vbcomment_uri',
+      'fieldable' => TRUE,
+      'controller class' => 'vbcommentController',
+      'entity keys' => array(
+        'id' => 'cid',
+        'bundle' => 'node_type',
+        'label' => 'subject',
+        'language' => 'language',
+      ),
+      'bundles' => array(),
+      'view modes' => array(
+        'full' => array(
+          'label' => t('Full vbcomment'),
+          'custom settings' => FALSE,
+        ),
+      ),
+      'static cache' => FALSE,
+    ),
+  );
+
+  foreach (node_type_get_names() as $type => $name) {
+    $return['vbcomment']['bundles']['vbcomment_node_' . $type] = array(
+      'label' => t('@node_type vbcomment', array('@node_type' => $name)),
+      // Provide the node type/bundle name for other modules, so it does not
+      // have to be extracted manually from the bundle name.
+      'node bundle' => $type,
+      'admin' => array(
+        // Place the Field UI paths for vbcomments one level below the
+        // corresponding paths for nodes, so that they appear in the same set
+        // of local tasks. Note that the paths use a different placeholder name
+        // and thus a different menu loader callback, so that Field UI page
+        // callbacks get a vbcomment bundle name from the node type in the URL.
+        // See vbcomment_node_type_load() and vbcomment_menu_alter().
+        'path' => 'admin/structure/types/manage/%vbcomment_node_type/vbcomment',
+        'bundle argument' => 4,
+        'real path' => 'admin/structure/types/manage/' . str_replace('_', '-', $type) . '/vbcomment',
+        'access arguments' => array('administer content types'),
+      ),
+    );
+  }
+
+  return $return;
+}
+
+/**
+ * Menu loader callback for Field UI paths.
+ *
+ * Return a vbcomment bundle name from a node type in the URL.
+ */
+function vbcomment_node_type_load($name) {
+  if ($type = node_type_get_type(strtr($name, array('-' => '_')))) {
+    return 'vbcomment_node_' . $type->type;
+  }
+}
+
+/**
+ * Implements hook_field_extra_fields().
+ */
+function vbcomment_field_extra_fields() {
+  $return = array();
+
+  foreach (node_type_get_types() as $type) {
+    if (variable_get('vbcomment_subject_field_' . $type->type, 1) == 1) {
+      $return['vbcomment']['vbcomment_node_' . $type->type] = array(
+        'form' => array(
+          'author' => array(
+            'label' => t('Author'),
+            'description' => t('Author textfield'),
+            'weight' => -2,
+          ),
+          'subject' => array(
+            'label' => t('Subject'),
+            'description' => t('Subject textfield'),
+            'weight' => -1,
+          ),
+        ),
+      );
+    }
+  }
+
+  return $return;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function vbcomment_theme() {
+  return array(
+    'vbcomment_block' => array(
+      'variables' => array(),
+    ),
+    'vbcomment_preview' => array(
+      'variables' => array('vbcomment' => NULL),
+    ),
+    'vbcomment' => array(
+      'template' => 'vbcomment',
+      'render element' => 'elements',
+    ),
+    'vbcomment_post_forbidden' => array(
+      'variables' => array('node' => NULL),
+    ),
+    'vbcomment_wrapper' => array(
+      'template' => 'vbcomment-wrapper',
+      'render element' => 'content',
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function vbcomment_menu() {
+  $items['comments/%node'] = array(
+    'title' => 'Add new Comment',
+    'page callback' => 'vbcomment_reply',
+    'page arguments' => array(1),
+    'file' => 'vbcomment.pages.inc',
+  );
+
+  return $items;
+}
+
+
+/**
+ * Implements hook_node_type_insert().
+ *
+ * Creates a vbcomment body field for a node type created while the vbcomment module
+ * is enabled. For node types created before the vbcomment module is enabled,
+ * hook_modules_enabled() serves to create the body fields.
+ *
+ * @see vbcomment_modules_enabled()
+ */
+function vbcomment_node_type_insert($info) {
+  _vbcomment_body_field_create($info);
+}
+
+/**
+ * Implements hook_node_type_update().
+ */
+function vbcomment_node_type_update($info) {
+  if (!empty($info->old_type) && $info->type != $info->old_type) {
+    field_attach_rename_bundle('vbcomment', 'vbcomment_node_' . $info->old_type, 'vbcomment_node_' . $info->type);
+  }
+}
+
+/**
+ * Implements hook_node_type_delete().
+ */
+function vbcomment_node_type_delete($info) {
+  field_attach_delete_bundle('vbcomment', 'vbcomment_node_' . $info->type);
+  $settings = array(
+    'vbcomment',
+    'vbcomment_default_mode',
+    'vbcomment_default_per_page',
+    'vbcomment_anonymous',
+    'vbcomment_subject_field',
+    'vbcomment_preview',
+    'vbcomment_form_location',
+  );
+  foreach ($settings as $setting) {
+    variable_del($setting . '_' . $info->type);
+  }
+}
+
+ /**
+ * Creates a vbcomment_body field instance for a given node type.
+ */
+function _vbcomment_threadid_field_create($info) {
+  // Create the field if needed.
+  if (!field_read_field('vbcomment_threadid', array('include_inactive' => TRUE))) {
+    $field = array(
+      'field_name' => 'vbcomment_threadid',
+      'type' => 'text',
+      'entity_types' => array('vbcomment'),
+    );
+    field_create_field($field);
+  }
+  // Create the instance if needed.
+  if (!field_read_instance('vbcomment', 'vbcomment_threadid', 'vbcomment_node_' . $info->type, array('include_inactive' => TRUE))) {
+    field_attach_create_bundle('vbcomment', 'vbcomment_node_' . $info->type);
+    // Attaches the body field by default.
+    $instance = array(
+      'field_name' => 'vbcomment_threadid',
+      'label' => 'vBComment ThreadId',
+      'entity_type' => 'vbcomment',
+      'bundle' => 'vbcomment_node_' . $info->type,
+      'settings' => array('text_processing' => 1),
+      'required' => TRUE,
+      'display' => array(
+        'default' => array(
+          'label' => 'hidden',
+          'type' => 'text',
+          'weight' => 0,
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+}
+
+
+/**
+ * Implements hook_block_info().
+ */
+function vbcomment_block_info() {
+  $blocks['recent']['info'] = t('Recent vbcomments');
+  $blocks['recent']['properties']['administrative'] = TRUE;
+
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_configure().
+ */
+function vbcomment_block_configure($delta = '') {
+  $form['vbcomment_block_count'] = array(
+    '#type' => 'select',
+    '#title' => t('Number of recent vbcomments'),
+    '#default_value' => variable_get('vbcomment_block_count', 10),
+    '#options' => drupal_map_assoc(array(2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 30)),
+  );
+
+  return $form;
+}
+
+/**
+ * Implements hook_block_save().
+ */
+function vbcomment_block_save($delta = '', $edit = array()) {
+  variable_set('vbcomment_block_count', (int) $edit['vbcomment_block_count']);
+}
+
+/**
+ * Implements hook_block_view().
+ *
+ * Generates a block with the most recent vbcomments.
+ */
+function vbcomment_block_view($delta = '') {
+  if (user_access('access vbcomments')) {
+    $block['subject'] = t('Recent vbcomments');
+    $block['content'] = theme('vbcomment_block');
+
+    return $block;
+  }
+}
+
+/**
+ * Redirects vbcomment links to the correct page depending on vbcomment settings.
+ *
+ * Since vbcomments are paged there is no way to guarantee which page a vbcomment
+ * appears on. vbcomment paging and threading settings may be changed at any time.
+ * With threaded vbcomments, an individual vbcomment may move between pages as
+ * vbcomments can be added either before or after it in the overall discussion.
+ * Therefore we use a central routing function for vbcomment links, which
+ * calculates the page number based on current vbcomment settings and returns
+ * the full vbcomment view with the pager set dynamically.
+ *
+ * @param $cid
+ *   A vbcomment identifier.
+ * @return
+ *   The vbcomment listing set to the page on which the vbcomment appears.
+ */
+function vbcomment_permalink($cid) {
+  if (($vbcomment = vbcomment_load($cid)) && ($node = node_load($vbcomment->nid))) {
+
+    // Find the current display page for this vbcomment.
+    $page = vbcomment_get_display_page($vbcomment->cid, $node->type);
+
+    // Set $_GET['q'] and $_GET['page'] ourselves so that the node callback
+    // behaves as it would when visiting the page directly.
+    $_GET['q'] = 'node/' . $node->nid;
+    $_GET['page'] = $page;
+
+    // Return the node view, this will show the correct vbcomment in context.
+    return menu_execute_active_handler('node/' . $node->nid, FALSE);
+  }
+  drupal_not_found();
+}
+
+/**
+ * Find the most recent vbcomments that are available to the current user.
+ *
+ * @param integer $number
+ *   (optional) The maximum number of vbcomments to find. Defaults to 10.
+ *
+ * @return
+ *   An array of vbcomment objects or an empty array if there are no recent
+ *   vbcomments visible to the current user.
+ */
+function vbcomment_get_recent($number = 10) {
+  $query = db_select('vbcomment', 'c');
+  $query->innerJoin('node', 'n', 'n.nid = c.nid');
+  $query->addTag('node_access');
+  $vbcomments = $query
+    ->fields('c')
+    ->condition('c.status', vbcomment_PUBLISHED)
+    ->condition('n.status', NODE_PUBLISHED)
+    ->orderBy('c.created', 'DESC')
+    // Additionally order by cid to ensure that vbcomments with the same timestamp
+    // are returned in the exact order posted.
+    ->orderBy('c.cid', 'DESC')
+    ->range(0, $number)
+    ->execute()
+    ->fetchAll();
+
+  return $vbcomments ? $vbcomments : array();
+}
+
+/**
+ * Calculate page number for first new vbcomment.
+ *
+ * @param $num_vbcomments
+ *   Number of vbcomments.
+ * @param $new_replies
+ *   Number of new replies.
+ * @param $node
+ *   The first new vbcomment node.
+ * @return
+ *   "page=X" if the page number is greater than zero; empty string otherwise.
+ */
+function vbcomment_new_page_count($num_vbcomments, $new_replies, $node) {
+  $mode = variable_get('vbcomment_default_mode_' . $node->type, vbcomment_MODE_THREADED);
+  $vbcomments_per_page = variable_get('vbcomment_default_per_page_' . $node->type, 50);
+  $pagenum = NULL;
+  $flat = $mode == vbcomment_MODE_FLAT ? TRUE : FALSE;
+  if ($num_vbcomments <= $vbcomments_per_page) {
+    // Only one page of vbcomments.
+    $pageno = 0;
+  }
+  elseif ($flat) {
+    // Flat vbcomments.
+    $count = $num_vbcomments - $new_replies;
+    $pageno = $count / $vbcomments_per_page;
+  }
+  else {
+    // Threaded vbcomments: we build a query with a subquery to find the first
+    // thread with a new vbcomment.
+
+    // 1. Find all the threads with a new vbcomment.
+    $unread_threads_query = db_select('vbcomment')
+      ->fields('vbcomment', array('thread'))
+      ->condition('nid', $node->nid)
+      ->condition('status', vbcomment_PUBLISHED)
+      ->orderBy('created', 'DESC')
+      ->orderBy('cid', 'DESC')
+      ->range(0, $new_replies);
+
+    // 2. Find the first thread.
+    $first_thread = db_select($unread_threads_query, 'thread')
+      ->fields('thread', array('thread'))
+      ->orderBy('SUBSTRING(thread, 1, (LENGTH(thread) - 1))')
+      ->range(0, 1)
+      ->execute()
+      ->fetchField();
+
+    // Remove the final '/'.
+    $first_thread = substr($first_thread, 0, -1);
+
+    // Find the number of the first vbcomment of the first unread thread.
+    $count = db_query('SELECT COUNT(*) FROM {vbcomment} WHERE nid = :nid AND status = :status AND SUBSTRING(thread, 1, (LENGTH(thread) - 1)) < :thread', array(
+      ':status' => vbcomment_PUBLISHED,
+      ':nid' => $node->nid,
+      ':thread' => $first_thread,
+    ))->fetchField();
+
+    $pageno = $count / $vbcomments_per_page;
+  }
+
+  if ($pageno >= 1) {
+    $pagenum = array('page' => intval($pageno));
+  }
+
+  return $pagenum;
+}
+
+/**
+ * Returns HTML for a list of recent vbcomments to be displayed in the vbcomment block.
+ *
+ * @ingroup themeable
+ */
+function theme_vbcomment_block() {
+  $items = array();
+  $number = variable_get('vbcomment_block_count', 10);
+  foreach (vbcomment_get_recent($number) as $vbcomment) {
+    $items[] = l($vbcomment->subject, 'vbcomment/' . $vbcomment->cid, array('fragment' => 'vbcomment-' . $vbcomment->cid)) . '&nbsp;<span>' . t('@time ago', array('@time' => format_interval(REQUEST_TIME - $vbcomment->changed))) . '</span>';
+  }
+
+  if ($items) {
+    return theme('item_list', array('items' => $items));
+  }
+  else {
+    return t('No vbcomments available.');
+  }
+}
+
+/**
+ * Implements hook_node_view().
+ */
+function vbcomment_node_view($node, $view_mode) {
+  $links = array();
+
+  if ($node->vbcomment != vbcomment_NODE_HIDDEN) {
+    if ($view_mode == 'rss') {
+      // Add a vbcomments RSS element which is a URL to the vbcomments of this node.
+      $node->rss_elements[] = array(
+        'key' => 'vbcomments',
+        'value' => url('node/' . $node->nid, array('fragment' => 'vbcomments', 'absolute' => TRUE))
+      );
+    }
+    elseif ($view_mode == 'teaser') {
+      // Teaser view: display the number of vbcomments that have been posted,
+      // or a link to add new vbcomments if the user has permission, the node
+      // is open to new vbcomments, and there currently are none.
+      if (user_access('access vbcomments')) {
+        if (!empty($node->vbcomment_count)) {
+          $links['vbcomment-vbcomments'] = array(
+            'title' => format_plural($node->vbcomment_count, '1 vbcomment', '@count vbcomments'),
+            'href' => "node/$node->nid",
+            'attributes' => array('title' => t('Jump to the first vbcomment of this posting.')),
+            'fragment' => 'vbcomments',
+            'html' => TRUE,
+          );
+          // Show a link to the first new vbcomment.
+          if ($new = vbcomment_num_new($node->nid)) {
+            $links['vbcomment-new-vbcomments'] = array(
+              'title' => format_plural($new, '1 new vbcomment', '@count new vbcomments'),
+              'href' => "node/$node->nid",
+              'query' => vbcomment_new_page_count($node->vbcomment_count, $new, $node),
+              'attributes' => array('title' => t('Jump to the first new vbcomment of this posting.')),
+              'fragment' => 'new',
+              'html' => TRUE,
+            );
+          }
+        }
+      }
+      if ($node->vbcomment == vbcomment_NODE_OPEN) {
+        if (user_access('post vbcomments')) {
+          $links['vbcomment-add'] = array(
+            'title' => t('Add new vbcomment'),
+            'href' => "vbcomment/reply/$node->nid",
+            'attributes' => array('title' => t('Add a new vbcomment to this page.')),
+            'fragment' => 'vbcomment-form',
+          );
+        }
+        else {
+          $links['vbcomment_forbidden'] = array(
+            'title' => theme('vbcomment_post_forbidden', array('node' => $node)),
+            'html' => TRUE,
+          );
+        }
+      }
+    }
+    elseif ($view_mode != 'search_index' && $view_mode != 'search_result') {
+      // Node in other view modes: add a "post vbcomment" link if the user is
+      // allowed to post vbcomments and if this node is allowing new vbcomments.
+      // But we don't want this link if we're building the node for search
+      // indexing or constructing a search result excerpt.
+      if ($node->vbcomment == vbcomment_NODE_OPEN) {
+        $vbcomment_form_location = variable_get('vbcomment_form_location_' . $node->type, vbcomment_FORM_BELOW);
+        if (user_access('post vbcomments')) {
+          // Show the "post vbcomment" link if the form is on another page, or
+          // if there are existing vbcomments that the link will skip past.
+          if ($vbcomment_form_location == vbcomment_FORM_SEPARATE_PAGE || (!empty($node->vbcomment_count) && user_access('access vbcomments'))) {
+            $links['vbcomment-add'] = array(
+              'title' => t('Add new vbcomment'),
+              'attributes' => array('title' => t('Share your thoughts and opinions related to this posting.')),
+              'href' => "node/$node->nid",
+              'fragment' => 'vbcomment-form',
+            );
+            if ($vbcomment_form_location == vbcomment_FORM_SEPARATE_PAGE) {
+              $links['vbcomment-add']['href'] = "vbcomment/reply/$node->nid";
+            }
+          }
+        }
+        else {
+          $links['vbcomment_forbidden'] = array(
+            'title' => theme('vbcomment_post_forbidden', array('node' => $node)),
+            'html' => TRUE,
+          );
+        }
+      }
+    }
+
+    $node->content['links']['vbcomment'] = array(
+      '#theme' => 'links__node__vbcomment',
+      '#links' => $links,
+      '#attributes' => array('class' => array('links', 'inline')),
+    );
+
+    // Only append vbcomments when we are building a node on its own node detail
+    // page. We compare $node and $page_node to ensure that vbcomments are not
+    // appended to other nodes shown on the page, for example a node_reference
+    // displayed in 'full' view mode within another node.
+    if ($node->vbcomment && $view_mode == 'full' && node_is_page($node) && empty($node->in_preview)) {
+      $node->content['vbcomments'] = vbcomment_node_page_additions($node);
+    }
+  }
+}
+
+/**
+ * Build the vbcomment-related elements for node detail pages.
+ *
+ * @param $node
+ *  A node object.
+ */
+function vbcomment_node_page_additions($node) {
+  $additions = array();
+
+  // Only attempt to render vbcomments if the node has visible vbcomments.
+  // Unpublished vbcomments are not included in $node->vbcomment_count, so show
+  // vbcomments unconditionally if the user is an administrator.
+  if (($node->vbcomment_count && user_access('access vbcomments')) || user_access('administer vbcomments')) {
+    $mode = variable_get('vbcomment_default_mode_' . $node->type, vbcomment_MODE_THREADED);
+    $vbcomments_per_page = variable_get('vbcomment_default_per_page_' . $node->type, 50);
+    if ($cids = vbcomment_get_thread($node, $mode, $vbcomments_per_page)) {
+      $vbcomments = vbcomment_load_multiple($cids);
+      vbcomment_prepare_thread($vbcomments);
+      $build = vbcomment_view_multiple($vbcomments, $node);
+      $build['pager']['#theme'] = 'pager';
+      $additions['vbcomments'] = $build;
+    }
+  }
+
+  // Append vbcomment form if needed.
+  if (user_access('post vbcomments') && $node->vbcomment == vbcomment_NODE_OPEN && (variable_get('vbcomment_form_location_' . $node->type, vbcomment_FORM_BELOW) == vbcomment_FORM_BELOW)) {
+    $build = drupal_get_form("vbcomment_node_{$node->type}_form", (object) array('nid' => $node->nid));
+    $additions['vbcomment_form'] = $build;
+  }
+
+  if ($additions) {
+    $additions += array(
+      '#theme' => 'vbcomment_wrapper__node_' . $node->type,
+      '#node' => $node,
+      'vbcomments' => array(),
+      'vbcomment_form' => array(),
+    );
+  }
+
+  return $additions;
+}
+
+/**
+ * Retrieve vbcomments for a thread.
+ *
+ * @param $node
+ *   The node whose vbcomment(s) needs rendering.
+ * @param $mode
+ *   The vbcomment display mode; vbcomment_MODE_FLAT or vbcomment_MODE_THREADED.
+ * @param $vbcomments_per_page
+ *   The amount of vbcomments to display per page.
+ *
+ * To display threaded vbcomments in the correct order we keep a 'thread' field
+ * and order by that value. This field keeps this data in
+ * a way which is easy to update and convenient to use.
+ *
+ * A "thread" value starts at "1". If we add a child (A) to this vbcomment,
+ * we assign it a "thread" = "1.1". A child of (A) will have "1.1.1". Next
+ * brother of (A) will get "1.2". Next brother of the parent of (A) will get
+ * "2" and so on.
+ *
+ * First of all note that the thread field stores the depth of the vbcomment:
+ * depth 0 will be "X", depth 1 "X.X", depth 2 "X.X.X", etc.
+ *
+ * Now to get the ordering right, consider this example:
+ *
+ * 1
+ * 1.1
+ * 1.1.1
+ * 1.2
+ * 2
+ *
+ * If we "ORDER BY thread ASC" we get the above result, and this is the
+ * natural order sorted by time. However, if we "ORDER BY thread DESC"
+ * we get:
+ *
+ * 2
+ * 1.2
+ * 1.1.1
+ * 1.1
+ * 1
+ *
+ * Clearly, this is not a natural way to see a thread, and users will get
+ * confused. The natural order to show a thread by time desc would be:
+ *
+ * 2
+ * 1
+ * 1.2
+ * 1.1
+ * 1.1.1
+ *
+ * which is what we already did before the standard pager patch. To achieve
+ * this we simply add a "/" at the end of each "thread" value. This way, the
+ * thread fields will look like this:
+ *
+ * 1/
+ * 1.1/
+ * 1.1.1/
+ * 1.2/
+ * 2/
+ *
+ * we add "/" since this char is, in ASCII, higher than every number, so if
+ * now we "ORDER BY thread DESC" we get the correct order. However this would
+ * spoil the reverse ordering, "ORDER BY thread ASC" -- here, we do not need
+ * to consider the trailing "/" so we use a substring only.
+ */
+function vbcomment_get_thread($node, $mode, $vbcomments_per_page) {
+  $query = db_select('vbcomment', 'c')->extend('PagerDefault');
+  $query->addField('c', 'cid');
+  $query
+    ->condition('c.nid', $node->nid)
+    ->addTag('node_access')
+    ->addTag('vbcomment_filter')
+    ->addMetaData('node', $node)
+    ->limit($vbcomments_per_page);
+
+  $count_query = db_select('vbcomment', 'c');
+  $count_query->addExpression('COUNT(*)');
+  $count_query
+    ->condition('c.nid', $node->nid)
+    ->addTag('node_access')
+    ->addTag('vbcomment_filter')
+    ->addMetaData('node', $node);
+
+  if (!user_access('administer vbcomments')) {
+    $query->condition('c.status', vbcomment_PUBLISHED);
+    $count_query->condition('c.status', vbcomment_PUBLISHED);
+  }
+  if ($mode === vbcomment_MODE_FLAT) {
+    $query->orderBy('c.cid', 'ASC');
+  }
+  else {
+    // See vbcomment above. Analysis reveals that this doesn't cost too
+    // much. It scales much much better than having the whole vbcomment
+    // structure.
+    $query->addExpression('SUBSTRING(c.thread, 1, (LENGTH(c.thread) - 1))', 'torder');
+    $query->orderBy('torder', 'ASC');
+  }
+
+  $query->setCountQuery($count_query);
+  $cids = $query->execute()->fetchCol();
+
+  return $cids;
+}
+
+/**
+ * Loop over vbcomment thread, noting indentation level.
+ *
+ * @param array $vbcomments
+ *   An array of vbcomment objects, keyed by cid.
+ * @return
+ *   The $vbcomments argument is altered by reference with indentation information.
+ */
+function vbcomment_prepare_thread(&$vbcomments) {
+  // A flag stating if we are still searching for first new vbcomment on the thread.
+  $first_new = TRUE;
+
+  // A counter that helps track how indented we are.
+  $divs = 0;
+
+  foreach ($vbcomments as $key => $vbcomment) {
+    if ($first_new && $vbcomment->new != MARK_READ) {
+      // Assign the anchor only for the first new vbcomment. This avoids duplicate
+      // id attributes on a page.
+      $first_new = FALSE;
+      $vbcomment->first_new = TRUE;
+    }
+
+    // The $divs element instructs #prefix whether to add an indent div or
+    // close existing divs (a negative value).
+    $vbcomment->depth = count(explode('.', $vbcomment->thread)) - 1;
+    if ($vbcomment->depth > $divs) {
+      $vbcomment->divs = 1;
+      $divs++;
+    }
+    else {
+      $vbcomment->divs = $vbcomment->depth - $divs;
+      while ($vbcomment->depth < $divs) {
+        $divs--;
+      }
+    }
+    $vbcomments[$key] = $vbcomment;
+  }
+
+  // The final vbcomment must close up some hanging divs
+  $vbcomments[$key]->divs_final = $divs;
+}
+
+/**
+ * Generate an array for rendering the given vbcomment.
+ *
+ * @param $vbcomment
+ *   A vbcomment object.
+ * @param $node
+ *   The node the vbcomment is attached to.
+ * @param $view_mode
+ *   View mode, e.g. 'full', 'teaser'...
+ * @param $langcode
+ *   (optional) A language code to use for rendering. Defaults to the global
+ *   content language of the current request.
+ *
+ * @return
+ *   An array as expected by drupal_render().
+ */
+function vbcomment_view($vbcomment, $node, $view_mode = 'full', $langcode = NULL) {
+  if (!isset($langcode)) {
+    $langcode = $GLOBALS['language_content']->language;
+  }
+
+  // Populate $vbcomment->content with a render() array.
+  vbcomment_build_content($vbcomment, $node, $view_mode, $langcode);
+
+  $build = $vbcomment->content;
+  // We don't need duplicate rendering info in vbcomment->content.
+  unset($vbcomment->content);
+
+  $build += array(
+    '#theme' => 'vbcomment__node_' . $node->type,
+    '#vbcomment' => $vbcomment,
+    '#node' => $node,
+    '#view_mode' => $view_mode,
+    '#language' => $langcode,
+  );
+
+  if (empty($vbcomment->in_preview)) {
+    $prefix = '';
+    $is_threaded = isset($vbcomment->divs) && variable_get('vbcomment_default_mode_' . $node->type, vbcomment_MODE_THREADED) == vbcomment_MODE_THREADED;
+
+    // Add 'new' anchor if needed.
+    if (!empty($vbcomment->first_new)) {
+      $prefix .= "<a id=\"new\"></a>\n";
+    }
+
+    // Add indentation div or close open divs as needed.
+    if ($is_threaded) {
+      $prefix .= $vbcomment->divs <= 0 ? str_repeat('</div>', abs($vbcomment->divs)) : "\n" . '<div class="indented">';
+    }
+
+    // Add anchor for each vbcomment.
+    $prefix .= "<a id=\"vbcomment-$vbcomment->cid\"></a>\n";
+    $build['#prefix'] = $prefix;
+
+    // Close all open divs.
+    if ($is_threaded && !empty($vbcomment->divs_final)) {
+      $build['#suffix'] = str_repeat('</div>', $vbcomment->divs_final);
+    }
+  }
+
+  // Allow modules to modify the structured vbcomment.
+  $type = 'vbcomment';
+  drupal_alter(array('vbcomment_view', 'entity_view'), $build, $type);
+
+  return $build;
+}
+
+/**
+ * Builds a structured array representing the vbcomment's content.
+ *
+ * The content built for the vbcomment (field values, vbcomments, file attachments or
+ * other vbcomment components) will vary depending on the $view_mode parameter.
+ *
+ * @param $vbcomment
+ *   A vbcomment object.
+ * @param $node
+ *   The node the vbcomment is attached to.
+ * @param $view_mode
+ *   View mode, e.g. 'full', 'teaser'...
+ * @param $langcode
+ *   (optional) A language code to use for rendering. Defaults to the global
+ *   content language of the current request.
+ */
+function vbcomment_build_content($vbcomment, $node, $view_mode = 'full', $langcode = NULL) {
+  if (!isset($langcode)) {
+    $langcode = $GLOBALS['language_content']->language;
+  }
+
+  // Remove previously built content, if exists.
+  $vbcomment->content = array();
+
+  // Build fields content.
+  field_attach_prepare_view('vbcomment', array($vbcomment->cid => $vbcomment), $view_mode, $langcode);
+  entity_prepare_view('vbcomment', array($vbcomment->cid => $vbcomment), $langcode);
+  $vbcomment->content += field_attach_view('vbcomment', $vbcomment, $view_mode, $langcode);
+
+  $vbcomment->content['links'] = array(
+    '#theme' => 'links__vbcomment',
+    '#pre_render' => array('drupal_pre_render_links'),
+    '#attributes' => array('class' => array('links', 'inline')),
+  );
+  if (empty($vbcomment->in_preview)) {
+    $vbcomment->content['links']['vbcomment'] = array(
+      '#theme' => 'links__vbcomment__vbcomment',
+      '#links' => vbcomment_links($vbcomment, $node),
+      '#attributes' => array('class' => array('links', 'inline')),
+    );
+  }
+
+  // Allow modules to make their own additions to the vbcomment.
+  module_invoke_all('vbcomment_view', $vbcomment, $view_mode, $langcode);
+  module_invoke_all('entity_view', $vbcomment, 'vbcomment', $view_mode, $langcode);
+}
+
+/**
+ * Helper function, build links for an individual vbcomment.
+ *
+ * Adds reply, edit, delete etc. depending on the current user permissions.
+ *
+ * @param $vbcomment
+ *   The vbcomment object.
+ * @param $node
+ *   The node the vbcomment is attached to.
+ * @return
+ *   A structured array of links.
+ */
+function vbcomment_links($vbcomment, $node) {
+  $links = array();
+  if ($node->vbcomment == vbcomment_NODE_OPEN) {
+    if (user_access('administer vbcomments') && user_access('post vbcomments')) {
+      $links['vbcomment-delete'] = array(
+        'title' => t('delete'),
+        'href' => "vbcomment/$vbcomment->cid/delete",
+        'html' => TRUE,
+      );
+      $links['vbcomment-edit'] = array(
+        'title' => t('edit'),
+        'href' => "vbcomment/$vbcomment->cid/edit",
+        'html' => TRUE,
+      );
+      $links['vbcomment-reply'] = array(
+        'title' => t('reply'),
+        'href' => "vbcomment/reply/$vbcomment->nid/$vbcomment->cid",
+        'html' => TRUE,
+      );
+      if ($vbcomment->status == vbcomment_NOT_PUBLISHED) {
+        $links['vbcomment-approve'] = array(
+          'title' => t('approve'),
+          'href' => "vbcomment/$vbcomment->cid/approve",
+          'html' => TRUE,
+          'query' => array('token' => drupal_get_token("vbcomment/$vbcomment->cid/approve")),
+        );
+      }
+    }
+    elseif (user_access('post vbcomments')) {
+      if (vbcomment_access('edit', $vbcomment)) {
+        $links['vbcomment-edit'] = array(
+          'title' => t('edit'),
+          'href' => "vbcomment/$vbcomment->cid/edit",
+          'html' => TRUE,
+        );
+      }
+      $links['vbcomment-reply'] = array(
+        'title' => t('reply'),
+        'href' => "vbcomment/reply/$vbcomment->nid/$vbcomment->cid",
+        'html' => TRUE,
+      );
+    }
+    else {
+      $links['vbcomment_forbidden']['title'] = theme('vbcomment_post_forbidden', array('node' => $node));
+      $links['vbcomment_forbidden']['html'] = TRUE;
+    }
+  }
+  return $links;
+}
+
+/**
+ * Construct a drupal_render() style array from an array of loaded vbcomments.
+ *
+ * @param $vbcomments
+ *   An array of vbcomments as returned by vbcomment_load_multiple().
+ * @param $node
+ *   The node the vbcomments are attached to.
+ * @param $view_mode
+ *   View mode, e.g. 'full', 'teaser'...
+ * @param $weight
+ *   An integer representing the weight of the first vbcomment in the list.
+ * @param $langcode
+ *   A string indicating the language field values are to be shown in. If no
+ *   language is provided the current content language is used.
+ *
+ * @return
+ *   An array in the format expected by drupal_render().
+ */
+function vbcomment_view_multiple($vbcomments, $node, $view_mode = 'full', $weight = 0, $langcode = NULL) {
+  field_attach_prepare_view('vbcomment', $vbcomments, $view_mode, $langcode);
+  entity_prepare_view('vbcomment', $vbcomments, $langcode);
+
+  $build = array(
+    '#sorted' => TRUE,
+  );
+  foreach ($vbcomments as $vbcomment) {
+    $build[$vbcomment->cid] = vbcomment_view($vbcomment, $node, $view_mode, $langcode);
+    $build[$vbcomment->cid]['#weight'] = $weight;
+    $weight++;
+  }
+  return $build;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function vbcomment_form_node_type_form_alter(&$form, $form_state) {
+  if (isset($form['type'])) {
+    $form['vbcomment'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('vbcomment settings'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+      '#group' => 'additional_settings',
+      '#attributes' => array(
+        'class' => array('vbcomment-node-type-settings-form'),
+      ),
+      '#attached' => array(
+        'js' => array(drupal_get_path('module', 'vbcomment') . '/vbcomment-node-form.js'),
+      ),
+    );
+    // Unlike coment_form_node_form_alter(), all of these settings are applied
+    // as defaults to all new nodes. Therefore, it would be wrong to use #states
+    // to hide the other settings based on the primary vbcomment setting.
+    $form['vbcomment']['vbcomment'] = array(
+      '#type' => 'select',
+      '#title' => t('Default vbcomment setting for new content'),
+      '#default_value' => variable_get('vbcomment_' . $form['#node_type']->type, vbcomment_NODE_OPEN),
+      '#options' => array(
+        vbcomment_NODE_OPEN => t('Open'),
+        vbcomment_NODE_CLOSED => t('Closed'),
+        vbcomment_NODE_HIDDEN => t('Hidden'),
+      ),
+    );
+    $form['vbcomment']['vbcomment_default_mode'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Threading'),
+      '#default_value' => variable_get('vbcomment_default_mode_' . $form['#node_type']->type, vbcomment_MODE_THREADED),
+      '#description' => t('Show vbcomment replies in a threaded list.'),
+    );
+    $form['vbcomment']['vbcomment_default_per_page'] = array(
+      '#type' => 'select',
+      '#title' => t('vbcomments per page'),
+      '#default_value' => variable_get('vbcomment_default_per_page_' . $form['#node_type']->type, 50),
+      '#options' => _vbcomment_per_page(),
+    );
+    $form['vbcomment']['vbcomment_anonymous'] = array(
+      '#type' => 'select',
+      '#title' => t('Anonymous vbcommenting'),
+      '#default_value' => variable_get('vbcomment_anonymous_' . $form['#node_type']->type, vbcomment_ANONYMOUS_MAYNOT_CONTACT),
+      '#options' => array(
+        vbcomment_ANONYMOUS_MAYNOT_CONTACT => t('Anonymous posters may not enter their contact information'),
+        vbcomment_ANONYMOUS_MAY_CONTACT => t('Anonymous posters may leave their contact information'),
+        vbcomment_ANONYMOUS_MUST_CONTACT => t('Anonymous posters must leave their contact information'),
+      ),
+      '#access' => user_access('post vbcomments', drupal_anonymous_user()),
+    );
+    $form['vbcomment']['vbcomment_subject_field'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Allow vbcomment title'),
+      '#default_value' => variable_get('vbcomment_subject_field_' . $form['#node_type']->type, 1),
+    );
+    $form['vbcomment']['vbcomment_form_location'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show reply form on the same page as vbcomments'),
+      '#default_value' => variable_get('vbcomment_form_location_' . $form['#node_type']->type, vbcomment_FORM_BELOW),
+    );
+    $form['vbcomment']['vbcomment_preview'] = array(
+      '#type' => 'radios',
+      '#title' => t('Preview vbcomment'),
+      '#default_value' => variable_get('vbcomment_preview_' . $form['#node_type']->type, DRUPAL_OPTIONAL),
+      '#options' => array(
+        DRUPAL_DISABLED => t('Disabled'),
+        DRUPAL_OPTIONAL => t('Optional'),
+        DRUPAL_REQUIRED => t('Required'),
+      ),
+    );
+  }
+}
+
+/**
+ * Implements hook_form_BASE_FORM_ID_alter().
+ */
+function vbcomment_form_node_form_alter(&$form, $form_state) {
+  $node = $form['#node'];
+  $form['vbcomment_settings'] = array(
+    '#type' => 'fieldset',
+    '#access' => user_access('administer vbcomments'),
+    '#title' => t('vbcomment settings'),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+    '#group' => 'additional_settings',
+    '#attributes' => array(
+      'class' => array('vbcomment-node-settings-form'),
+    ),
+    '#attached' => array(
+      'js' => array(drupal_get_path('module', 'vbcomment') . '/vbcomment-node-form.js'),
+     ),
+    '#weight' => 30,
+  );
+  $vbcomment_count = isset($node->nid) ? db_query('SELECT vbcomment_count FROM {node_vbcomment_statistics} WHERE nid = :nid', array(':nid' => $node->nid))->fetchField() : 0;
+  $vbcomment_settings = ($node->vbcomment == vbcomment_NODE_HIDDEN && empty($vbcomment_count)) ? vbcomment_NODE_CLOSED : $node->vbcomment;
+  $form['vbcomment_settings']['vbcomment'] = array(
+    '#type' => 'radios',
+    '#title' => t('vbcomments'),
+    '#title_display' => 'invisible',
+    '#parents' => array('vbcomment'),
+    '#default_value' => $vbcomment_settings,
+    '#options' => array(
+      vbcomment_NODE_OPEN => t('Open'),
+      vbcomment_NODE_CLOSED => t('Closed'),
+      vbcomment_NODE_HIDDEN => t('Hidden'),
+    ),
+    vbcomment_NODE_OPEN => array(
+      '#description' => t('Users with the "Post vbcomments" permission can post vbcomments.'),
+    ),
+    vbcomment_NODE_CLOSED => array(
+      '#description' => t('Users cannot post vbcomments, but existing vbcomments will be displayed.'),
+    ),
+    vbcomment_NODE_HIDDEN => array(
+      '#description' => t('vbcomments are hidden from view.'),
+    ),
+  );
+  // If the node doesn't have any vbcomments, the "hidden" option makes no
+  // sense, so don't even bother presenting it to the user.
+  if (empty($vbcomment_count)) {
+    $form['vbcomment_settings']['vbcomment'][vbcomment_NODE_HIDDEN]['#access'] = FALSE;
+    // Also adjust the description of the "closed" option.
+    $form['vbcomment_settings']['vbcomment'][vbcomment_NODE_CLOSED]['#description'] = t('Users cannot post vbcomments.');
+  }
+}
+
+/**
+ * Implements hook_node_load().
+ */
+function vbcomment_node_load($nodes, $types) {
+  $vbcomments_enabled = array();
+
+  // Check if vbcomments are enabled for each node. If vbcomments are disabled,
+  // assign values without hitting the database.
+  foreach ($nodes as $node) {
+    // Store whether vbcomments are enabled for this node.
+    if ($node->vbcomment != vbcomment_NODE_HIDDEN) {
+      $vbcomments_enabled[] = $node->nid;
+    }
+    else {
+      $node->cid = 0;
+      $node->last_vbcomment_timestamp = $node->created;
+      $node->last_vbcomment_name = '';
+      $node->last_vbcomment_uid = $node->uid;
+      $node->vbcomment_count = 0;
+    }
+  }
+
+  // For nodes with vbcomments enabled, fetch information from the database.
+  if (!empty($vbcomments_enabled)) {
+    $result = db_query('SELECT nid, cid, last_vbcomment_timestamp, last_vbcomment_name, last_vbcomment_uid, vbcomment_count FROM {node_vbcomment_statistics} WHERE nid IN (:vbcomments_enabled)', array(':vbcomments_enabled' => $vbcomments_enabled));
+    foreach ($result as $record) {
+      $nodes[$record->nid]->cid = $record->cid;
+      $nodes[$record->nid]->last_vbcomment_timestamp = $record->last_vbcomment_timestamp;
+      $nodes[$record->nid]->last_vbcomment_name = $record->last_vbcomment_name;
+      $nodes[$record->nid]->last_vbcomment_uid = $record->last_vbcomment_uid;
+      $nodes[$record->nid]->vbcomment_count = $record->vbcomment_count;
+    }
+  }
+}
+
+/**
+ * Implements hook_node_prepare().
+ */
+function vbcomment_node_prepare($node) {
+  if (!isset($node->vbcomment)) {
+    $node->vbcomment = variable_get("vbcomment_$node->type", vbcomment_NODE_OPEN);
+  }
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function vbcomment_node_insert($node) {
+  // Allow bulk updates and inserts to temporarily disable the
+  // maintenance of the {node_vbcomment_statistics} table.
+  if (variable_get('vbcomment_maintain_node_statistics', TRUE)) {
+    db_insert('node_vbcomment_statistics')
+      ->fields(array(
+        'nid' => $node->nid,
+        'cid' => 0,
+        'last_vbcomment_timestamp' => $node->changed,
+        'last_vbcomment_name' => NULL,
+        'last_vbcomment_uid' => $node->uid,
+        'vbcomment_count' => 0,
+      ))
+      ->execute();
+  }
+}
+
+/**
+ * Implements hook_node_delete().
+ */
+function vbcomment_node_delete($node) {
+  $cids = db_query('SELECT cid FROM {vbcomment} WHERE nid = :nid', array(':nid' => $node->nid))->fetchCol();
+  vbcomment_delete_multiple($cids);
+  db_delete('node_vbcomment_statistics')
+    ->condition('nid', $node->nid)
+    ->execute();
+}
+
+/**
+ * Implements hook_node_update_index().
+ */
+function vbcomment_node_update_index($node) {
+  $index_vbcomments = &drupal_static(__FUNCTION__);
+
+  if ($index_vbcomments === NULL) {
+    // Find and save roles that can 'access vbcomments' or 'search content'.
+    $perms = array('access vbcomments' => array(), 'search content' => array());
+    $result = db_query("SELECT rid, permission FROM {role_permission} WHERE permission IN ('access vbcomments', 'search content')");
+    foreach ($result as $record) {
+      $perms[$record->permission][$record->rid] = $record->rid;
+    }
+
+    // Prevent indexing of vbcomments if there are any roles that can search but
+    // not view vbcomments.
+    $index_vbcomments = TRUE;
+    foreach ($perms['search content'] as $rid) {
+      if (!isset($perms['access vbcomments'][$rid]) && ($rid <= DRUPAL_AUTHENTICATED_RID || !isset($perms['access vbcomments'][DRUPAL_AUTHENTICATED_RID]))) {
+        $index_vbcomments = FALSE;
+        break;
+      }
+    }
+  }
+
+  if ($index_vbcomments) {
+    $mode = variable_get('vbcomment_default_mode_' . $node->type, vbcomment_MODE_THREADED);
+    $vbcomments_per_page = variable_get('vbcomment_default_per_page_' . $node->type, 50);
+    if ($node->vbcomment && $cids = vbcomment_get_thread($node, $mode, $vbcomments_per_page)) {
+      $vbcomments = vbcomment_load_multiple($cids);
+      vbcomment_prepare_thread($vbcomments);
+      $build = vbcomment_view_multiple($vbcomments, $node);
+      return drupal_render($build);
+    }
+  }
+  return '';
+}
+
+/**
+ * Implements hook_update_index().
+ */
+function vbcomment_update_index() {
+  // Store the maximum possible vbcomments per thread (used for ranking by reply count)
+  variable_set('node_cron_vbcomments_scale', 1.0 / max(1, db_query('SELECT MAX(vbcomment_count) FROM {node_vbcomment_statistics}')->fetchField()));
+}
+
+/**
+ * Implements hook_node_search_result().
+ *
+ * Formats a vbcomment count string and returns it, for display with search
+ * results.
+ */
+function vbcomment_node_search_result($node) {
+  // Do not make a string if vbcomments are hidden.
+  if (user_access('access vbcomments') && $node->vbcomment != vbcomment_NODE_HIDDEN) {
+    $vbcomments = db_query('SELECT vbcomment_count FROM {node_vbcomment_statistics} WHERE nid = :nid', array('nid' => $node->nid))->fetchField();
+    // Do not make a string if vbcomments are closed and there are currently
+    // zero vbcomments.
+    if ($node->vbcomment != vbcomment_NODE_CLOSED || $vbcomments > 0) {
+      return array('vbcomment' => format_plural($vbcomments, '1 vbcomment', '@count vbcomments'));
+    }
+  }
+}
+
+/**
+ * Implements hook_user_cancel().
+ */
+function vbcomment_user_cancel($edit, $account, $method) {
+  switch ($method) {
+    case 'user_cancel_block_unpublish':
+      $vbcomments = vbcomment_load_multiple(array(), array('uid' => $account->uid));
+      foreach ($vbcomments as $vbcomment) {
+        $vbcomment->status = 0;
+        vbcomment_save($vbcomment);
+      }
+      break;
+
+    case 'user_cancel_reassign':
+      $vbcomments = vbcomment_load_multiple(array(), array('uid' => $account->uid));
+      foreach ($vbcomments as $vbcomment) {
+        $vbcomment->uid = 0;
+        vbcomment_save($vbcomment);
+      }
+      break;
+  }
+}
+
+/**
+ * Implements hook_user_delete().
+ */
+function vbcomment_user_delete($account) {
+  $cids = db_query('SELECT c.cid FROM {vbcomment} c WHERE uid = :uid', array(':uid' => $account->uid))->fetchCol();
+  vbcomment_delete_multiple($cids);
+}
+
+/**
+ * Determines whether the current user has access to a particular vbcomment.
+ *
+ * Authenticated users can edit their vbcomments as long they have not been
+ * replied to. This prevents people from changing or revising their statements
+ * based on the replies to their posts.
+ *
+ * @param $op
+ *   The operation that is to be performed on the vbcomment. Only 'edit' is
+ *   recognized now.
+ * @param $vbcomment
+ *   The vbcomment object.
+ * @return
+ *   TRUE if the current user has acces to the vbcomment, FALSE otherwise.
+ */
+function vbcomment_access($op, $vbcomment) {
+  global $user;
+
+  if ($op == 'edit') {
+    return ($user->uid && $user->uid == $vbcomment->uid && $vbcomment->status == vbcomment_PUBLISHED && user_access('edit own vbcomments')) || user_access('administer vbcomments');
+  }
+}
+
+/**
+ * Accepts a submission of new or changed vbcomment content.
+ *
+ * @param $vbcomment
+ *   A vbcomment object.
+ */
+function vbcomment_save($vbcomment) {
+  global $user;
+
+  $transaction = db_transaction();
+  try {
+    $defaults = array(
+      'mail' => '',
+      'homepage' => '',
+      'name' => '',
+      'status' => user_access('skip vbcomment approval') ? vbcomment_PUBLISHED : vbcomment_NOT_PUBLISHED,
+    );
+    foreach ($defaults as $key => $default) {
+      if (!isset($vbcomment->$key)) {
+        $vbcomment->$key = $default;
+      }
+    }
+    // Make sure we have a bundle name.
+    if (!isset($vbcomment->node_type)) {
+      $node = node_load($vbcomment->nid);
+      $vbcomment->node_type = 'vbcomment_node_' . $node->type;
+    }
+
+    // Load the stored entity, if any.
+    if (!empty($vbcomment->cid) && !isset($vbcomment->original)) {
+      $vbcomment->original = entity_load_unchanged('vbcomment', $vbcomment->cid);
+    }
+
+    field_attach_presave('vbcomment', $vbcomment);
+
+    // Allow modules to alter the vbcomment before saving.
+    module_invoke_all('vbcomment_presave', $vbcomment);
+    module_invoke_all('entity_presave', $vbcomment, 'vbcomment');
+
+    if ($vbcomment->cid) {
+
+      drupal_write_record('vbcomment', $vbcomment, 'cid');
+
+      // Ignore slave server temporarily to give time for the
+      // saved vbcomment to be propagated to the slave.
+      db_ignore_slave();
+
+      // Update the {node_vbcomment_statistics} table prior to executing hooks.
+      _vbcomment_update_node_statistics($vbcomment->nid);
+
+      field_attach_update('vbcomment', $vbcomment);
+      // Allow modules to respond to the updating of a vbcomment.
+      module_invoke_all('vbcomment_update', $vbcomment);
+      module_invoke_all('entity_update', $vbcomment, 'vbcomment');
+    }
+    else {
+      // Add the vbcomment to database. This next section builds the thread field.
+      // Also see the documentation for vbcomment_view().
+      if (!empty($vbcomment->thread)) {
+        // Allow calling code to set thread itself.
+        $thread = $vbcomment->thread;
+      }
+      elseif ($vbcomment->pid == 0) {
+        // This is a vbcomment with no parent vbcomment (depth 0): we start
+        // by retrieving the maximum thread level.
+        $max = db_query('SELECT MAX(thread) FROM {vbcomment} WHERE nid = :nid', array(':nid' => $vbcomment->nid))->fetchField();
+        // Strip the "/" from the end of the thread.
+        $max = rtrim($max, '/');
+        // We need to get the value at the correct depth.
+        $parts = explode('.', $max);
+        $firstsegment = $parts[0];
+        // Finally, build the thread field for this new vbcomment.
+        $thread = int2vancode(vancode2int($firstsegment) + 1) . '/';
+      }
+      else {
+        // This is a vbcomment with a parent vbcomment, so increase the part of the
+        // thread value at the proper depth.
+
+        // Get the parent vbcomment:
+        $parent = vbcomment_load($vbcomment->pid);
+        // Strip the "/" from the end of the parent thread.
+        $parent->thread = (string) rtrim((string) $parent->thread, '/');
+        // Get the max value in *this* thread.
+        $max = db_query("SELECT MAX(thread) FROM {vbcomment} WHERE thread LIKE :thread AND nid = :nid", array(
+          ':thread' => $parent->thread . '.%',
+          ':nid' => $vbcomment->nid,
+        ))->fetchField();
+
+        if ($max == '') {
+          // First child of this parent.
+          $thread = $parent->thread . '.' . int2vancode(0) . '/';
+        }
+        else {
+          // Strip the "/" at the end of the thread.
+          $max = rtrim($max, '/');
+          // Get the value at the correct depth.
+          $parts = explode('.', $max);
+          $parent_depth = count(explode('.', $parent->thread));
+          $last = $parts[$parent_depth];
+          // Finally, build the thread field for this new vbcomment.
+          $thread = $parent->thread . '.' . int2vancode(vancode2int($last) + 1) . '/';
+        }
+      }
+
+      if (empty($vbcomment->created)) {
+        $vbcomment->created = REQUEST_TIME;
+      }
+
+      if (empty($vbcomment->changed)) {
+        $vbcomment->changed = $vbcomment->created;
+      }
+
+      if ($vbcomment->uid === $user->uid && isset($user->name)) { // '===' Need to modify anonymous users as well.
+        $vbcomment->name = $user->name;
+      }
+
+      // Ensure the parent id (pid) has a value set.
+      if (empty($vbcomment->pid)) {
+        $vbcomment->pid = 0;
+      }
+
+      // Add the values which aren't passed into the function.
+      $vbcomment->thread = $thread;
+      $vbcomment->hostname = ip_address();
+
+      drupal_write_record('vbcomment', $vbcomment);
+
+      // Ignore slave server temporarily to give time for the
+      // created vbcomment to be propagated to the slave.
+      db_ignore_slave();
+
+      // Update the {node_vbcomment_statistics} table prior to executing hooks.
+      _vbcomment_update_node_statistics($vbcomment->nid);
+
+      field_attach_insert('vbcomment', $vbcomment);
+
+      // Tell the other modules a new vbcomment has been submitted.
+      module_invoke_all('vbcomment_insert', $vbcomment);
+      module_invoke_all('entity_insert', $vbcomment, 'vbcomment');
+    }
+    if ($vbcomment->status == vbcomment_PUBLISHED) {
+      module_invoke_all('vbcomment_publish', $vbcomment);
+    }
+    unset($vbcomment->original);
+  }
+  catch (Exception $e) {
+    $transaction->rollback('vbcomment');
+    watchdog_exception('vbcomment', $e);
+    throw $e;
+  }
+
+}
+
+/**
+ * Delete a vbcomment and all its replies.
+ *
+ * @param $cid
+ *   The vbcomment to delete.
+ */
+function vbcomment_delete($cid) {
+  vbcomment_delete_multiple(array($cid));
+}
+
+/**
+ * Delete vbcomments and all their replies.
+ *
+ * @param $cids
+ *   The vbcomment to delete.
+ */
+function vbcomment_delete_multiple($cids) {
+  $vbcomments = vbcomment_load_multiple($cids);
+  if ($vbcomments) {
+    $transaction = db_transaction();
+    try {
+      // Delete the vbcomments.
+      db_delete('vbcomment')
+        ->condition('cid', array_keys($vbcomments), 'IN')
+        ->execute();
+      foreach ($vbcomments as $vbcomment) {
+        field_attach_delete('vbcomment', $vbcomment);
+        module_invoke_all('vbcomment_delete', $vbcomment);
+        module_invoke_all('entity_delete', $vbcomment, 'vbcomment');
+
+        // Delete the vbcomment's replies.
+        $child_cids = db_query('SELECT cid FROM {vbcomment} WHERE pid = :cid', array(':cid' => $vbcomment->cid))->fetchCol();
+        vbcomment_delete_multiple($child_cids);
+        _vbcomment_update_node_statistics($vbcomment->nid);
+      }
+    }
+    catch (Exception $e) {
+      $transaction->rollback();
+      watchdog_exception('vbcomment', $e);
+      throw $e;
+    }
+  }
+}
+
+/**
+ * Load vbcomments from the database.
+ *
+ * @param $cids
+ *   An array of vbcomment IDs.
+ * @param $conditions
+ *   (deprecated) An associative array of conditions on the {vbcomments}
+ *   table, where the keys are the database fields and the values are the
+ *   values those fields must have. Instead, it is preferable to use
+ *   EntityFieldQuery to retrieve a list of entity IDs loadable by
+ *   this function.
+ * @param $reset
+ *   Whether to reset the internal static entity cache. Note that the static
+ *   cache is disabled in vbcomment_entity_info() by default.
+ *
+ * @return
+ *   An array of vbcomment objects, indexed by vbcomment ID.
+ *
+ * @see entity_load()
+ * @see EntityFieldQuery
+ *
+ * @todo Remove $conditions in Drupal 8.
+ */
+function vbcomment_load_multiple($cids = array(), $conditions = array(), $reset = FALSE) {
+  return entity_load('vbcomment', $cids, $conditions, $reset);
+}
+
+/**
+ * Load the entire vbcomment by cid.
+ *
+ * @param $cid
+ *   The identifying vbcomment id.
+ * @param $reset
+ *   Whether to reset the internal static entity cache. Note that the static
+ *   cache is disabled in vbcomment_entity_info() by default.
+ *
+ * @return
+ *   The vbcomment object.
+ */
+function vbcomment_load($cid, $reset = FALSE) {
+  $vbcomment = vbcomment_load_multiple(array($cid), array(), $reset);
+  return $vbcomment ? $vbcomment[$cid] : FALSE;
+}
+
+/**
+ * Controller class for vbcomments.
+ *
+ * This extends the DrupalDefaultEntityController class, adding required
+ * special handling for vbcomment objects.
+ */
+class vbcommentController extends DrupalDefaultEntityController {
+
+  protected function buildQuery($ids, $conditions = array(), $revision_id = FALSE) {
+    $query = parent::buildQuery($ids, $conditions, $revision_id);
+    // Specify additional fields from the user and node tables.
+    $query->innerJoin('node', 'n', 'base.nid = n.nid');
+    $query->addField('n', 'type', 'node_type');
+    $query->innerJoin('users', 'u', 'base.uid = u.uid');
+    $query->addField('u', 'name', 'registered_name');
+    $query->fields('u', array('uid', 'signature', 'signature_format', 'picture'));
+    return $query;
+  }
+
+  protected function attachLoad(&$vbcomments, $revision_id = FALSE) {
+    // Setup standard vbcomment properties.
+    foreach ($vbcomments as $key => $vbcomment) {
+      $vbcomment->name = $vbcomment->uid ? $vbcomment->registered_name : $vbcomment->name;
+      $vbcomment->new = node_mark($vbcomment->nid, $vbcomment->changed);
+      $vbcomment->node_type = 'vbcomment_node_' . $vbcomment->node_type;
+      $vbcomments[$key] = $vbcomment;
+    }
+    parent::attachLoad($vbcomments, $revision_id);
+  }
+}
+
+/**
+ * Get number of new vbcomments for current user and specified node.
+ *
+ * @param $nid
+ *   Node-id to count vbcomments for.
+ * @param $timestamp
+ *   Time to count from (defaults to time of last user access
+ *   to node).
+ * @return The result or FALSE on error.
+ */
+function vbcomment_num_new($nid, $timestamp = 0) {
+  global $user;
+
+  if ($user->uid) {
+    // Retrieve the timestamp at which the current user last viewed this node.
+    if (!$timestamp) {
+      $timestamp = node_last_viewed($nid);
+    }
+    $timestamp = ($timestamp > NODE_NEW_LIMIT ? $timestamp : NODE_NEW_LIMIT);
+
+    // Use the timestamp to retrieve the number of new vbcomments.
+    return db_query('SELECT COUNT(cid) FROM {vbcomment} WHERE nid = :nid AND created > :timestamp AND status = :status', array(
+      ':nid' => $nid,
+      ':timestamp' => $timestamp,
+      ':status' => vbcomment_PUBLISHED,
+      ))->fetchField();
+  }
+  else {
+    return FALSE;
+  }
+
+}
+
+/**
+ * Get the display ordinal for a vbcomment, starting from 0.
+ *
+ * Count the number of vbcomments which appear before the vbcomment we want to
+ * display, taking into account display settings and threading.
+ *
+ * @param $cid
+ *   The vbcomment ID.
+ * @param $node_type
+ *   The node type of the vbcomment's parent.
+ * @return
+ *   The display ordinal for the vbcomment.
+ * @see vbcomment_get_display_page()
+ */
+function vbcomment_get_display_ordinal($cid, $node_type) {
+  // Count how many vbcomments (c1) are before $cid (c2) in display order. This is
+  // the 0-based display ordinal.
+  $query = db_select('vbcomment', 'c1');
+  $query->innerJoin('vbcomment', 'c2', 'c2.nid = c1.nid');
+  $query->addExpression('COUNT(*)', 'count');
+  $query->condition('c2.cid', $cid);
+  if (!user_access('administer vbcomments')) {
+    $query->condition('c1.status', vbcomment_PUBLISHED);
+  }
+  $mode = variable_get('vbcomment_default_mode_' . $node_type, vbcomment_MODE_THREADED);
+
+  if ($mode == vbcomment_MODE_FLAT) {
+    // For flat vbcomments, cid is used for ordering vbcomments due to
+    // unpredicatable behavior with timestamp, so we make the same assumption
+    // here.
+    $query->condition('c1.cid', $cid, '<');
+  }
+  else {
+    // For threaded vbcomments, the c.thread column is used for ordering. We can
+    // use the vancode for comparison, but must remove the trailing slash.
+    // See vbcomment_view_multiple().
+    $query->where('SUBSTRING(c1.thread, 1, (LENGTH(c1.thread) -1)) < SUBSTRING(c2.thread, 1, (LENGTH(c2.thread) -1))');
+  }
+
+  return $query->execute()->fetchField();
+}
+
+/**
+ * Return the page number for a vbcomment.
+ *
+ * Finds the correct page number for a vbcomment taking into account display
+ * and paging settings.
+ *
+ * @param $cid
+ *   The vbcomment ID.
+ * @param $node_type
+ *   The node type the vbcomment is attached to.
+ * @return
+ *   The page number.
+ */
+function vbcomment_get_display_page($cid, $node_type) {
+  $ordinal = vbcomment_get_display_ordinal($cid, $node_type);
+  $vbcomments_per_page = variable_get('vbcomment_default_per_page_' . $node_type, 50);
+  return floor($ordinal / $vbcomments_per_page);
+}
+
+/**
+ * Page callback for vbcomment editing.
+ */
+function vbcomment_edit_page($vbcomment) {
+  drupal_set_title(t('Edit vbcomment %vbcomment', array('%vbcomment' => $vbcomment->subject)), PASS_THROUGH);
+  $node = node_load($vbcomment->nid);
+  return drupal_get_form("vbcomment_node_{$node->type}_form", $vbcomment);
+}
+
+/**
+ * Implements hook_forms().
+ */
+function vbcomment_forms() {
+  $forms = array();
+  foreach (node_type_get_types() as $type) {
+    $forms["vbcomment_node_{$type->type}_form"]['callback'] = 'vbcomment_form';
+  }
+  return $forms;
+}
+
+/**
+ * Generate the basic vbcommenting form, for appending to a node or display on a separate page.
+ *
+ * @see vbcomment_form_validate()
+ * @see vbcomment_form_submit()
+ *
+ * @ingroup forms
+ */
+function vbcomment_form($form, &$form_state, $vbcomment) {
+  global $user;
+
+  // During initial form build, add the vbcomment entity to the form state for
+  // use during form building and processing. During a rebuild, use what is in
+  // the form state.
+  if (!isset($form_state['vbcomment'])) {
+    $defaults = array(
+      'name' => '',
+      'mail' => '',
+      'homepage' => '',
+      'subject' => '',
+      'vbcomment' => '',
+      'cid' => NULL,
+      'pid' => NULL,
+      'language' => LANGUAGE_NONE,
+      'uid' => 0,
+    );
+    foreach ($defaults as $key => $value) {
+      if (!isset($vbcomment->$key)) {
+        $vbcomment->$key = $value;
+      }
+    }
+    $form_state['vbcomment'] = $vbcomment;
+  }
+  else {
+    $vbcomment = $form_state['vbcomment'];
+  }
+
+  $node = node_load($vbcomment->nid);
+  $form['#node'] = $node;
+
+  // Use #vbcomment-form as unique jump target, regardless of node type.
+  $form['#id'] = drupal_html_id('vbcomment_form');
+  $form['#attributes']['class'][] = 'vbcomment-form';
+  $form['#theme'] = array('vbcomment_form__node_' . $node->type, 'vbcomment_form');
+
+  $anonymous_contact = variable_get('vbcomment_anonymous_' . $node->type, vbcomment_ANONYMOUS_MAYNOT_CONTACT);
+  $is_admin = (!empty($vbcomment->cid) && user_access('administer vbcomments'));
+
+  if (!$user->uid && $anonymous_contact != vbcomment_ANONYMOUS_MAYNOT_CONTACT) {
+    $form['#attached']['library'][] = array('system', 'jquery.cookie');
+    $form['#attributes']['class'][] = 'user-info-from-cookie';
+  }
+
+  // If not replying to a vbcomment, use our dedicated page callback for new
+  // vbcomments on nodes.
+  if (empty($vbcomment->cid) && empty($vbcomment->pid)) {
+    $form['#action'] = url('vbcomment/reply/' . $vbcomment->nid);
+  }
+
+  if (isset($form_state['vbcomment_preview'])) {
+    $form += $form_state['vbcomment_preview'];
+  }
+
+  // Display author information in a fieldset for vbcomment moderators.
+  if ($is_admin) {
+    $form['author'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Administration'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+      '#weight' => -2,
+    );
+  }
+  else {
+    // Sets the author form elements above the subject.
+    $form['author'] = array(
+      '#weight' => -2,
+    );
+  }
+
+  // Prepare default values for form elements.
+  if ($is_admin) {
+    $author = (!$vbcomment->uid && $vbcomment->name ? $vbcomment->name : $vbcomment->registered_name);
+    $status = (isset($vbcomment->status) ? $vbcomment->status : vbcomment_NOT_PUBLISHED);
+    $date = (!empty($vbcomment->date) ? $vbcomment->date : format_date($vbcomment->created, 'custom', 'Y-m-d H:i O'));
+  }
+  else {
+    if ($user->uid) {
+      $author = $user->name;
+    }
+    else {
+      $author = ($vbcomment->name ? $vbcomment->name : '');
+    }
+    $status = (user_access('skip vbcomment approval') ? vbcomment_PUBLISHED : vbcomment_NOT_PUBLISHED);
+    $date = '';
+  }
+
+  // Add the author name field depending on the current user.
+  if ($is_admin) {
+    $form['author']['name'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Authored by'),
+      '#default_value' => $author,
+      '#maxlength' => 60,
+      '#size' => 30,
+      '#description' => t('Leave blank for %anonymous.', array('%anonymous' => variable_get('anonymous', t('Anonymous')))),
+      '#autocomplete_path' => 'user/autocomplete',
+    );
+  }
+  elseif ($user->uid) {
+    $form['author']['_author'] = array(
+      '#type' => 'item',
+      '#title' => t('Your name'),
+      '#markup' => theme('username', array('account' => $user)),
+    );
+    $form['author']['name'] = array(
+      '#type' => 'value',
+      '#value' => $author,
+    );
+  }
+  else {
+    $form['author']['name'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Your name'),
+      '#default_value' => $author,
+      '#required' => (!$user->uid && $anonymous_contact == vbcomment_ANONYMOUS_MUST_CONTACT),
+      '#maxlength' => 60,
+      '#size' => 30,
+    );
+  }
+
+  // Add author e-mail and homepage fields depending on the current user.
+  $form['author']['mail'] = array(
+    '#type' => 'textfield',
+    '#title' => t('E-mail'),
+    '#default_value' => $vbcomment->mail,
+    '#required' => (!$user->uid && $anonymous_contact == vbcomment_ANONYMOUS_MUST_CONTACT),
+    '#maxlength' => 64,
+    '#size' => 30,
+    '#description' => t('The content of this field is kept private and will not be shown publicly.'),
+    '#access' => $is_admin || (!$user->uid && $anonymous_contact != vbcomment_ANONYMOUS_MAYNOT_CONTACT),
+  );
+  $form['author']['homepage'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Homepage'),
+    '#default_value' => $vbcomment->homepage,
+    '#maxlength' => 255,
+    '#size' => 30,
+    '#access' => $is_admin || (!$user->uid && $anonymous_contact != vbcomment_ANONYMOUS_MAYNOT_CONTACT),
+  );
+
+  // Add administrative vbcomment publishing options.
+  $form['author']['date'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Authored on'),
+    '#default_value' => $date,
+    '#maxlength' => 25,
+    '#size' => 20,
+    '#access' => $is_admin,
+  );
+  $form['author']['status'] = array(
+    '#type' => 'radios',
+    '#title' => t('Status'),
+    '#default_value' => $status,
+    '#options' => array(
+      vbcomment_PUBLISHED => t('Published'),
+      vbcomment_NOT_PUBLISHED => t('Not published'),
+    ),
+    '#access' => $is_admin,
+  );
+
+  $form['subject'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Subject'),
+    '#maxlength' => 64,
+    '#default_value' => $vbcomment->subject,
+    '#access' => variable_get('vbcomment_subject_field_' . $node->type, 1) == 1,
+    '#weight' => -1,
+  );
+
+  // Used for conditional validation of author fields.
+  $form['is_anonymous'] = array(
+    '#type' => 'value',
+    '#value' => ($vbcomment->cid ? !$vbcomment->uid : !$user->uid),
+  );
+
+  // Add internal vbcomment properties.
+  foreach (array('cid', 'pid', 'nid', 'language', 'uid') as $key) {
+    $form[$key] = array('#type' => 'value', '#value' => $vbcomment->$key);
+  }
+  $form['node_type'] = array('#type' => 'value', '#value' => 'vbcomment_node_' . $node->type);
+
+  // Only show the save button if vbcomment previews are optional or if we are
+  // already previewing the submission.
+  $form['actions'] = array('#type' => 'actions');
+  $form['actions']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save'),
+    '#access' => ($vbcomment->cid && user_access('administer vbcomments')) || variable_get('vbcomment_preview_' . $node->type, DRUPAL_OPTIONAL) != DRUPAL_REQUIRED || isset($form_state['vbcomment_preview']),
+    '#weight' => 19,
+  );
+  $form['actions']['preview'] = array(
+    '#type' => 'submit',
+    '#value' => t('Preview'),
+    '#access' => (variable_get('vbcomment_preview_' . $node->type, DRUPAL_OPTIONAL) != DRUPAL_DISABLED),
+    '#weight' => 20,
+    '#submit' => array('vbcomment_form_build_preview'),
+  );
+
+  // Attach fields.
+  $vbcomment->node_type = 'vbcomment_node_' . $node->type;
+  field_attach_form('vbcomment', $vbcomment, $form, $form_state);
+
+  return $form;
+}
+
+/**
+ * Build a preview from submitted form values.
+ */
+function vbcomment_form_build_preview($form, &$form_state) {
+  $vbcomment = vbcomment_form_submit_build_vbcomment($form, $form_state);
+  $form_state['vbcomment_preview'] = vbcomment_preview($vbcomment);
+  $form_state['rebuild'] = TRUE;
+}
+
+/**
+ * Generate a vbcomment preview.
+ */
+function vbcomment_preview($vbcomment) {
+  global $user;
+
+  drupal_set_title(t('Preview vbcomment'), PASS_THROUGH);
+
+  $node = node_load($vbcomment->nid);
+
+  if (!form_get_errors()) {
+    $vbcomment->format = $vbcomment->vbcomment_body[LANGUAGE_NONE][0]['format'];
+    // Attach the user and time information.
+    if (!empty($vbcomment->name)) {
+      $account = user_load_by_name($vbcomment->name);
+    }
+    elseif ($user->uid && empty($vbcomment->is_anonymous)) {
+      $account = $user;
+    }
+
+    if (!empty($account->uid)) {
+      $vbcomment->uid = $account->uid;
+      $vbcomment->name = check_plain($account->name);
+      $vbcomment->signature = $account->signature;
+      $vbcomment->signature_format = $account->signature_format;
+      $vbcomment->picture = $account->picture;
+    }
+    elseif (empty($vbcomment->name)) {
+      $vbcomment->name = variable_get('anonymous', t('Anonymous'));
+    }
+
+    $vbcomment->created = !empty($vbcomment->created) ? $vbcomment->created : REQUEST_TIME;
+    $vbcomment->changed = REQUEST_TIME;
+    $vbcomment->in_preview = TRUE;
+    $vbcomment_build = vbcomment_view($vbcomment, $node);
+    $vbcomment_build['#weight'] = -100;
+
+    $form['vbcomment_preview'] = $vbcomment_build;
+  }
+
+  if ($vbcomment->pid) {
+    $build = array();
+    if ($vbcomments = vbcomment_load_multiple(array($vbcomment->pid), array('status' => vbcomment_PUBLISHED))) {
+      $parent_vbcomment = $vbcomments[$vbcomment->pid];
+      $build = vbcomment_view($parent_vbcomment, $node);
+    }
+  }
+  else {
+    $build = node_view($node);
+  }
+
+  $form['vbcomment_output_below'] = $build;
+  $form['vbcomment_output_below']['#weight'] = 100;
+
+  return $form;
+}
+
+/**
+ * Validate vbcomment form submissions.
+ */
+function vbcomment_form_validate($form, &$form_state) {
+  global $user;
+
+  entity_form_field_validate('vbcomment', $form, $form_state);
+
+  if (!empty($form_state['values']['cid'])) {
+    // Verify the name in case it is being changed from being anonymous.
+    $account = user_load_by_name($form_state['values']['name']);
+    $form_state['values']['uid'] = $account ? $account->uid : 0;
+
+    if ($form_state['values']['date'] && strtotime($form_state['values']['date']) === FALSE) {
+      form_set_error('date', t('You have to specify a valid date.'));
+    }
+    if ($form_state['values']['name'] && !$form_state['values']['is_anonymous'] && !$account) {
+      form_set_error('name', t('You have to specify a valid author.'));
+    }
+  }
+  elseif ($form_state['values']['is_anonymous']) {
+    // Validate anonymous vbcomment author fields (if given). If the (original)
+    // author of this vbcomment was an anonymous user, verify that no registered
+    // user with this name exists.
+    if ($form_state['values']['name']) {
+      $query = db_select('users', 'u');
+      $query->addField('u', 'uid', 'uid');
+      $taken = $query
+        ->condition('name', db_like($form_state['values']['name']), 'LIKE')
+        ->countQuery()
+        ->execute()
+        ->fetchField();
+      if ($taken) {
+        form_set_error('name', t('The name you used belongs to a registered user.'));
+      }
+    }
+  }
+  if ($form_state['values']['mail'] && !valid_email_address($form_state['values']['mail'])) {
+    form_set_error('mail', t('The e-mail address you specified is not valid.'));
+  }
+  if ($form_state['values']['homepage'] && !valid_url($form_state['values']['homepage'], TRUE)) {
+    form_set_error('homepage', t('The URL of your homepage is not valid. Remember that it must be fully qualified, i.e. of the form <code>http://example.com/directory</code>.'));
+  }
+}
+
+/**
+ * Prepare a vbcomment for submission.
+ */
+function vbcomment_submit($vbcomment) {
+  // @todo Legacy support. Remove in Drupal 8.
+  if (is_array($vbcomment)) {
+    $vbcomment += array('subject' => '');
+    $vbcomment = (object) $vbcomment;
+  }
+
+  if (empty($vbcomment->date)) {
+    $vbcomment->date = 'now';
+  }
+  $vbcomment->created = strtotime($vbcomment->date);
+  $vbcomment->changed = REQUEST_TIME;
+
+  // If the vbcomment was posted by a registered user, assign the author's ID.
+  // @todo Too fragile. Should be prepared and stored in vbcomment_form() already.
+  if (!$vbcomment->is_anonymous && !empty($vbcomment->name) && ($account = user_load_by_name($vbcomment->name))) {
+    $vbcomment->uid = $account->uid;
+  }
+  // If the vbcomment was posted by an anonymous user and no author name was
+  // required, use "Anonymous" by default.
+  if ($vbcomment->is_anonymous && (!isset($vbcomment->name) || $vbcomment->name === '')) {
+    $vbcomment->name = variable_get('anonymous', t('Anonymous'));
+  }
+
+  // Validate the vbcomment's subject. If not specified, extract from vbcomment body.
+  if (trim($vbcomment->subject) == '') {
+    // The body may be in any format, so:
+    // 1) Filter it into HTML
+    // 2) Strip out all HTML tags
+    // 3) Convert entities back to plain-text.
+    $vbcomment_body = $vbcomment->vbcomment_body[LANGUAGE_NONE][0];
+    if (isset($vbcomment_body['format'])) {
+      $vbcomment_text = check_markup($vbcomment_body['value'], $vbcomment_body['format']);
+    }
+    else {
+      $vbcomment_text = check_plain($vbcomment_body['value']);
+    }
+    $vbcomment->subject = truncate_utf8(trim(decode_entities(strip_tags($vbcomment_text))), 29, TRUE);
+    // Edge cases where the vbcomment body is populated only by HTML tags will
+    // require a default subject.
+    if ($vbcomment->subject == '') {
+      $vbcomment->subject = t('(No subject)');
+    }
+  }
+  return $vbcomment;
+}
+
+/**
+ * Updates the form state's vbcomment entity by processing this submission's values.
+ *
+ * This is the default builder function for the vbcomment form. It is called
+ * during the "Save" and "Preview" submit handlers to retrieve the entity to
+ * save or preview. This function can also be called by a "Next" button of a
+ * wizard to update the form state's entity with the current step's values
+ * before proceeding to the next step.
+ *
+ * @see vbcomment_form()
+ */
+function vbcomment_form_submit_build_vbcomment($form, &$form_state) {
+  $vbcomment = $form_state['vbcomment'];
+  entity_form_submit_build_entity('vbcomment', $vbcomment, $form, $form_state);
+  vbcomment_submit($vbcomment);
+  return $vbcomment;
+}
+
+/**
+ * Process vbcomment form submissions; prepare the vbcomment, store it, and set a redirection target.
+ */
+function vbcomment_form_submit($form, &$form_state) {
+  $node = node_load($form_state['values']['nid']);
+  $vbcomment = vbcomment_form_submit_build_vbcomment($form, $form_state);
+  if (user_access('post vbcomments') && (user_access('administer vbcomments') || $node->vbcomment == vbcomment_NODE_OPEN)) {
+    // Save the anonymous user information to a cookie for reuse.
+    if (user_is_anonymous()) {
+      user_cookie_save(array_intersect_key($form_state['values'], array_flip(array('name', 'mail', 'homepage'))));
+    }
+
+    vbcomment_save($vbcomment);
+    $form_state['values']['cid'] = $vbcomment->cid;
+
+    // Add an entry to the watchdog log.
+    watchdog('content', 'vbcomment posted: %subject.', array('%subject' => $vbcomment->subject), WATCHDOG_NOTICE, l(t('view'), 'vbcomment/' . $vbcomment->cid, array('fragment' => 'vbcomment-' . $vbcomment->cid)));
+
+    // Explain the approval queue if necessary.
+    if ($vbcomment->status == vbcomment_NOT_PUBLISHED) {
+      if (!user_access('administer vbcomments')) {
+        drupal_set_message(t('Your vbcomment has been queued for review by site administrators and will be published after approval.'));
+      }
+    }
+    else {
+      drupal_set_message(t('Your vbcomment has been posted.'));
+    }
+    $query = array();
+    // Find the current display page for this vbcomment.
+    $page = vbcomment_get_display_page($vbcomment->cid, $node->type);
+    if ($page > 0) {
+      $query['page'] = $page;
+    }
+    // Redirect to the newly posted vbcomment.
+    $redirect = array('node/' . $node->nid, array('query' => $query, 'fragment' => 'vbcomment-' . $vbcomment->cid));
+  }
+  else {
+    watchdog('content', 'vbcomment: unauthorized vbcomment submitted or vbcomment submitted to a closed post %subject.', array('%subject' => $vbcomment->subject), WATCHDOG_WARNING);
+    drupal_set_message(t('vbcomment: unauthorized vbcomment submitted or vbcomment submitted to a closed post %subject.', array('%subject' => $vbcomment->subject)), 'error');
+    // Redirect the user to the node they are vbcommenting on.
+    $redirect = 'node/' . $node->nid;
+  }
+  $form_state['redirect'] = $redirect;
+  // Clear the block and page caches so that anonymous users see the vbcomment
+  // they have posted.
+  cache_clear_all();
+}
+
+/**
+ * Process variables for vbcomment.tpl.php.
+ *
+ * @see vbcomment.tpl.php
+ */
+function template_preprocess_vbcomment(&$variables) {
+  $vbcomment = $variables['elements']['#vbcomment'];
+  $node = $variables['elements']['#node'];
+  $variables['vbcomment']   = $vbcomment;
+  $variables['node']      = $node;
+  $variables['author']    = theme('username', array('account' => $vbcomment));
+  $variables['created']   = format_date($vbcomment->created);
+  $variables['changed']   = format_date($vbcomment->changed);
+
+  $variables['new']       = !empty($vbcomment->new) ? t('new') : '';
+  $variables['picture']   = theme_get_setting('toggle_vbcomment_user_picture') ? theme('user_picture', array('account' => $vbcomment)) : '';
+  $variables['signature'] = $vbcomment->signature;
+
+  $uri = entity_uri('vbcomment', $vbcomment);
+  $uri['options'] += array('attributes' => array('class' => 'permalink', 'rel' => 'bookmark'));
+
+  $variables['title']     = l($vbcomment->subject, $uri['path'], $uri['options']);
+  $variables['permalink'] = l(t('Permalink'), $uri['path'], $uri['options']);
+  $variables['submitted'] = t('Submitted by !username on !datetime', array('!username' => $variables['author'], '!datetime' => $variables['created']));
+
+  // Preprocess fields.
+  field_attach_preprocess('vbcomment', $vbcomment, $variables['elements'], $variables);
+
+  // Helpful $content variable for templates.
+  foreach (element_children($variables['elements']) as $key) {
+    $variables['content'][$key] = $variables['elements'][$key];
+  }
+
+  // Set status to a string representation of vbcomment->status.
+  if (isset($vbcomment->in_preview)) {
+    $variables['status'] = 'vbcomment-preview';
+  }
+  else {
+    $variables['status'] = ($vbcomment->status == vbcomment_NOT_PUBLISHED) ? 'vbcomment-unpublished' : 'vbcomment-published';
+  }
+
+  // Gather vbcomment classes.
+  // 'vbcomment-published' class is not needed, it is either 'vbcomment-preview' or
+  // 'vbcomment-unpublished'.
+  if ($variables['status'] != 'vbcomment-published') {
+    $variables['classes_array'][] = $variables['status'];
+  }
+  if ($variables['new']) {
+    $variables['classes_array'][] = 'vbcomment-new';
+  }
+  if (!$vbcomment->uid) {
+    $variables['classes_array'][] = 'vbcomment-by-anonymous';
+  }
+  else {
+    if ($vbcomment->uid == $variables['node']->uid) {
+      $variables['classes_array'][] = 'vbcomment-by-node-author';
+    }
+    if ($vbcomment->uid == $variables['user']->uid) {
+      $variables['classes_array'][] = 'vbcomment-by-viewer';
+    }
+  }
+}
+
+/**
+ * Returns HTML for a "you can't post vbcomments" notice.
+ *
+ * @param $variables
+ *   An associative array containing:
+ *   - node: The vbcomment node.
+ *
+ * @ingroup themeable
+ */
+function theme_vbcomment_post_forbidden($variables) {
+  $node = $variables['node'];
+  global $user;
+
+  // Since this is expensive to compute, we cache it so that a page with many
+  // vbcomments only has to query the database once for all the links.
+  $authenticated_post_vbcomments = &drupal_static(__FUNCTION__, NULL);
+
+  if (!$user->uid) {
+    if (!isset($authenticated_post_vbcomments)) {
+      // We only output a link if we are certain that users will get permission
+      // to post vbcomments by logging in.
+      $vbcomment_roles = user_roles(TRUE, 'post vbcomments');
+      $authenticated_post_vbcomments = isset($vbcomment_roles[DRUPAL_AUTHENTICATED_RID]);
+    }
+
+    if ($authenticated_post_vbcomments) {
+      // We cannot use drupal_get_destination() because these links
+      // sometimes appear on /node and taxonomy listing pages.
+      if (variable_get('vbcomment_form_location_' . $node->type, vbcomment_FORM_BELOW) == vbcomment_FORM_SEPARATE_PAGE) {
+        $destination = array('destination' => "vbcomment/reply/$node->nid#vbcomment-form");
+      }
+      else {
+        $destination = array('destination' => "node/$node->nid#vbcomment-form");
+      }
+
+      if (variable_get('user_register', USER_REGISTER_VISITORS_ADMINISTRATIVE_APPROVAL)) {
+        // Users can register themselves.
+        return t('<a href="@login">Log in</a> or <a href="@register">register</a> to post vbcomments', array('@login' => url('user/login', array('query' => $destination)), '@register' => url('user/register', array('query' => $destination))));
+      }
+      else {
+        // Only admins can add new users, no public registration.
+        return t('<a href="@login">Log in</a> to post vbcomments', array('@login' => url('user/login', array('query' => $destination))));
+      }
+    }
+  }
+}
+
+/**
+ * Process variables for vbcomment-wrapper.tpl.php.
+ *
+ * @see vbcomment-wrapper.tpl.php
+ * @see theme_vbcomment_wrapper()
+ */
+function template_preprocess_vbcomment_wrapper(&$variables) {
+  // Provide contextual information.
+  $variables['node'] = $variables['content']['#node'];
+  $variables['display_mode'] = variable_get('vbcomment_default_mode_' . $variables['node']->type, vbcomment_MODE_THREADED);
+  // The vbcomment form is optional and may not exist.
+  $variables['content'] += array('vbcomment_form' => array());
+}
+
+/**
+ * Return an array of viewing modes for vbcomment listings.
+ *
+ * We can't use a global variable array because the locale system
+ * is not initialized yet when the vbcomment module is loaded.
+ */
+function _vbcomment_get_modes() {
+  return array(
+    vbcomment_MODE_FLAT => t('Flat list'),
+    vbcomment_MODE_THREADED => t('Threaded list')
+  );
+}
+
+/**
+ * Return an array of "vbcomments per page" settings from which the user
+ * can choose.
+ */
+function _vbcomment_per_page() {
+  return drupal_map_assoc(array(10, 30, 50, 70, 90, 150, 200, 250, 300));
+}
+
+/**
+ * Updates the vbcomment statistics for a given node. This should be called any
+ * time a vbcomment is added, deleted, or updated.
+ *
+ * The following fields are contained in the node_vbcomment_statistics table.
+ * - last_vbcomment_timestamp: the timestamp of the last vbcomment for this node or the node create stamp if no vbcomments exist for the node.
+ * - last_vbcomment_name: the name of the anonymous poster for the last vbcomment
+ * - last_vbcomment_uid: the uid of the poster for the last vbcomment for this node or the node authors uid if no vbcomments exists for the node.
+ * - vbcomment_count: the total number of approved/published vbcomments on this node.
+ */
+function _vbcomment_update_node_statistics($nid) {
+  // Allow bulk updates and inserts to temporarily disable the
+  // maintenance of the {node_vbcomment_statistics} table.
+  if (!variable_get('vbcomment_maintain_node_statistics', TRUE)) {
+    return;
+  }
+
+  $count = db_query('SELECT COUNT(cid) FROM {vbcomment} WHERE nid = :nid AND status = :status', array(
+    ':nid' => $nid,
+    ':status' => vbcomment_PUBLISHED,
+  ))->fetchField();
+
+  if ($count > 0) {
+    // vbcomments exist.
+    $last_reply = db_query_range('SELECT cid, name, changed, uid FROM {vbcomment} WHERE nid = :nid AND status = :status ORDER BY cid DESC', 0, 1, array(
+      ':nid' => $nid,
+      ':status' => vbcomment_PUBLISHED,
+    ))->fetchObject();
+    db_update('node_vbcomment_statistics')
+      ->fields(array(
+        'cid' => $last_reply->cid,
+        'vbcomment_count' => $count,
+        'last_vbcomment_timestamp' => $last_reply->changed,
+        'last_vbcomment_name' => $last_reply->uid ? '' : $last_reply->name,
+        'last_vbcomment_uid' => $last_reply->uid,
+      ))
+      ->condition('nid', $nid)
+      ->execute();
+  }
+  else {
+    // vbcomments do not exist.
+    $node = db_query('SELECT uid, created FROM {node} WHERE nid = :nid', array(':nid' => $nid))->fetchObject();
+    db_update('node_vbcomment_statistics')
+      ->fields(array(
+        'cid' => 0,
+        'vbcomment_count' => 0,
+        'last_vbcomment_timestamp' => $node->created,
+        'last_vbcomment_name' => '',
+        'last_vbcomment_uid' => $node->uid,
+      ))
+      ->condition('nid', $nid)
+      ->execute();
+  }
+}
+
+/**
+ * Generate vancode.
+ *
+ * Consists of a leading character indicating length, followed by N digits
+ * with a numerical value in base 36. Vancodes can be sorted as strings
+ * without messing up numerical order.
+ *
+ * It goes:
+ * 00, 01, 02, ..., 0y, 0z,
+ * 110, 111, ... , 1zy, 1zz,
+ * 2100, 2101, ..., 2zzy, 2zzz,
+ * 31000, 31001, ...
+ */
+function int2vancode($i = 0) {
+  $num = base_convert((int) $i, 10, 36);
+  $length = strlen($num);
+
+  return chr($length + ord('0') - 1) . $num;
+}
+
+/**
+ * Decode vancode back to an integer.
+ */
+function vancode2int($c = '00') {
+  return base_convert(substr($c, 1), 36, 10);
+}
+
+/**
+ * Implements hook_action_info().
+ */
+function vbcomment_action_info() {
+  return array(
+    'vbcomment_publish_action' => array(
+      'label' => t('Publish vbcomment'),
+      'type' => 'vbcomment',
+      'configurable' => FALSE,
+      'behavior' => array('changes_property'),
+      'triggers' => array('vbcomment_presave', 'vbcomment_insert', 'vbcomment_update'),
+    ),
+    'vbcomment_unpublish_action' => array(
+      'label' => t('Unpublish vbcomment'),
+      'type' => 'vbcomment',
+      'configurable' => FALSE,
+      'behavior' => array('changes_property'),
+      'triggers' => array('vbcomment_presave', 'vbcomment_insert', 'vbcomment_update'),
+    ),
+    'vbcomment_unpublish_by_keyword_action' => array(
+      'label' => t('Unpublish vbcomment containing keyword(s)'),
+      'type' => 'vbcomment',
+      'configurable' => TRUE,
+      'behavior' => array('changes_property'),
+      'triggers' => array('vbcomment_presave', 'vbcomment_insert', 'vbcomment_update'),
+    ),
+    'vbcomment_save_action' => array(
+      'label' => t('Save vbcomment'),
+      'type' => 'vbcomment',
+      'configurable' => FALSE,
+      'triggers' => array('vbcomment_insert', 'vbcomment_update'),
+    ),
+  );
+}
+
+/**
+ * Publishes a vbcomment.
+ *
+ * @param $vbcomment
+ *   An optional vbcomment object.
+ * @param array $context
+ *   Array with components:
+ *   - 'cid': vbcomment ID. Required if $vbcomment is not given.
+ *
+ * @ingroup actions
+ */
+function vbcomment_publish_action($vbcomment, $context = array()) {
+  if (isset($vbcomment->subject)) {
+    $subject = $vbcomment->subject;
+    $vbcomment->status = vbcomment_PUBLISHED;
+  }
+  else {
+    $cid = $context['cid'];
+    $subject = db_query('SELECT subject FROM {vbcomment} WHERE cid = :cid', array(':cid' => $cid))->fetchField();
+    db_update('vbcomment')
+      ->fields(array('status' => vbcomment_PUBLISHED))
+      ->condition('cid', $cid)
+      ->execute();
+  }
+  watchdog('action', 'Published vbcomment %subject.', array('%subject' => $subject));
+}
+
+/**
+ * Unpublishes a vbcomment.
+ *
+ * @param $vbcomment
+ *   An optional vbcomment object.
+ * @param array $context
+ *   Array with components:
+ *   - 'cid': vbcomment ID. Required if $vbcomment is not given.
+ *
+ * @ingroup actions
+ */
+function vbcomment_unpublish_action($vbcomment, $context = array()) {
+  if (isset($vbcomment->subject)) {
+    $subject = $vbcomment->subject;
+    $vbcomment->status = vbcomment_NOT_PUBLISHED;
+  }
+  else {
+    $cid = $context['cid'];
+    $subject = db_query('SELECT subject FROM {vbcomment} WHERE cid = :cid', array(':cid' => $cid))->fetchField();
+    db_update('vbcomment')
+      ->fields(array('status' => vbcomment_NOT_PUBLISHED))
+      ->condition('cid', $cid)
+      ->execute();
+  }
+  watchdog('action', 'Unpublished vbcomment %subject.', array('%subject' => $subject));
+}
+
+/**
+ * Unpublishes a vbcomment if it contains certain keywords.
+ *
+ * @param $vbcomment
+ *   vbcomment object to modify.
+ * @param array $context
+ *   Array with components:
+ *   - 'keywords': Keywords to look for. If the vbcomment contains at least one
+ *     of the keywords, it is unpublished.
+ *
+ * @ingroup actions
+ * @see vbcomment_unpublish_by_keyword_action_form()
+ * @see vbcomment_unpublish_by_keyword_action_submit()
+ */
+function vbcomment_unpublish_by_keyword_action($vbcomment, $context) {
+  foreach ($context['keywords'] as $keyword) {
+    $text = drupal_render($vbcomment);
+    if (strpos($text, $keyword) !== FALSE) {
+      $vbcomment->status = vbcomment_NOT_PUBLISHED;
+      watchdog('action', 'Unpublished vbcomment %subject.', array('%subject' => $vbcomment->subject));
+      break;
+    }
+  }
+}
+
+/**
+ * Form builder; Prepare a form for blacklisted keywords.
+ *
+ * @ingroup forms
+ * @see vbcomment_unpublish_by_keyword_action()
+ * @see vbcomment_unpublish_by_keyword_action_submit()
+ */
+function vbcomment_unpublish_by_keyword_action_form($context) {
+  $form['keywords'] = array(
+    '#title' => t('Keywords'),
+    '#type' => 'textarea',
+    '#description' => t('The vbcomment will be unpublished if it contains any of the phrases above. Use a case-sensitive, comma-separated list of phrases. Example: funny, bungee jumping, "Company, Inc."'),
+    '#default_value' => isset($context['keywords']) ? drupal_implode_tags($context['keywords']) : '',
+  );
+
+  return $form;
+}
+
+/**
+ * Process vbcomment_unpublish_by_keyword_action_form form submissions.
+ *
+ * @see vbcomment_unpublish_by_keyword_action()
+ */
+function vbcomment_unpublish_by_keyword_action_submit($form, $form_state) {
+  return array('keywords' => drupal_explode_tags($form_state['values']['keywords']));
+}
+
+/**
+ * Saves a vbcomment.
+ *
+ * @ingroup actions
+ */
+function vbcomment_save_action($vbcomment) {
+  vbcomment_save($vbcomment);
+  cache_clear_all();
+  watchdog('action', 'Saved vbcomment %title', array('%title' => $vbcomment->subject));
+}
+
+/**
+ * Implements hook_ranking().
+ */
+function vbcomment_ranking() {
+  return array(
+    'vbcomments' => array(
+      'title' => t('Number of vbcomments'),
+      'join' => array(
+        'type' => 'LEFT',
+        'table' => 'node_vbcomment_statistics',
+        'alias' => 'node_vbcomment_statistics',
+        'on' => 'node_vbcomment_statistics.nid = i.sid',
+      ),
+      // Inverse law that maps the highest reply count on the site to 1 and 0 to 0.
+      'score' => '2.0 - 2.0 / (1.0 + node_vbcomment_statistics.vbcomment_count * CAST(:scale AS DECIMAL))',
+      'arguments' => array(':scale' => variable_get('node_cron_vbcomments_scale', 0)),
+    ),
+  );
+}
+
+/**
+ * Implements hook_rdf_mapping().
+ */
+function vbcomment_rdf_mapping() {
+  return array(
+    array(
+      'type' => 'vbcomment',
+      'bundle' => RDF_DEFAULT_BUNDLE,
+      'mapping' => array(
+        'rdftype' => array('sioc:Post', 'sioct:vbcomment'),
+        'title' => array(
+          'predicates' => array('dc:title'),
+        ),
+        'created' => array(
+          'predicates' => array('dc:date', 'dc:created'),
+          'datatype' => 'xsd:dateTime',
+          'callback' => 'date_iso8601',
+        ),
+        'changed' => array(
+          'predicates' => array('dc:modified'),
+          'datatype' => 'xsd:dateTime',
+          'callback' => 'date_iso8601',
+        ),
+        'vbcomment_body' => array(
+          'predicates' => array('content:encoded'),
+        ),
+        'pid' => array(
+          'predicates' => array('sioc:reply_of'),
+          'type' => 'rel',
+        ),
+        'uid' => array(
+          'predicates' => array('sioc:has_creator'),
+          'type' => 'rel',
+        ),
+        'name' => array(
+          'predicates' => array('foaf:name'),
+        ),
+      ),
+    ),
+  );
+}
+
+/**
+ * Implements hook_file_download_access().
+ */
+function vbcomment_file_download_access($field, $entity_type, $entity) {
+  if ($entity_type == 'vbcomment') {
+    if (user_access('access vbcomments') && $entity->status == vbcomment_PUBLISHED || user_access('administer vbcomments')) {
+      $node = node_load($entity->nid);
+      return node_access('view', $node);
+    }
+    return FALSE;
+  }
+}
